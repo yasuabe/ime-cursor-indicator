@@ -19,7 +19,8 @@ Ubuntu の例:
 
 ```bash
 sudo apt install -y gir1.2-ibus-1.0 python3-gi python3-xlib \
-    gir1.2-pango-1.0 gir1.2-pangocairo-1.0 python3-cairo
+    gir1.2-pango-1.0 gir1.2-pangocairo-1.0 python3-cairo \
+    gir1.2-ayatanaappindicator3-0.1
 ```
 
 ### 実行

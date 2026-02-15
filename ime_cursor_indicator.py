@@ -13,10 +13,13 @@ from dataclasses import dataclass
 import cairo
 import gi
 
+gi.require_version("Gtk", "3.0")
 gi.require_version("IBus", "1.0")
 gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
-from gi.repository import GLib, IBus, Pango, PangoCairo
+gi.require_version("AyatanaAppIndicator3", "0.1")
+from gi.repository import GLib, Gtk, IBus, Pango, PangoCairo
+from gi.repository import AyatanaAppIndicator3 as AppIndicator3
 from Xlib import X, Xatom, display
 
 
@@ -270,6 +273,27 @@ class OverlayWindow:
         self.window.destroy()
         self.display.flush()
 
+class TrayIndicator:
+    def __init__(self, on_quit):
+        self.indicator = AppIndicator3.Indicator.new(
+            "ime-cursor-indicator",
+            "input-keyboard",
+            AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+        )
+        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self.indicator.set_label("A", "あ")
+
+        menu = Gtk.Menu()
+        item_quit = Gtk.MenuItem(label="Quit")
+        item_quit.connect("activate", lambda _: on_quit())
+        menu.append(item_quit)
+        menu.show_all()
+        self.indicator.set_menu(menu)
+
+    def set_label(self, label: str):
+        self.indicator.set_label(label, "あ")
+
+
 def atom_type(name: str) -> int:
     if name == "ATOM":
         return Xatom.ATOM
@@ -307,16 +331,22 @@ def main():
         opacity=args.opacity,
     )
 
-    ibus_bus = IBus.Bus()
-    watcher = IBusWatcher(ibus_bus, overlay.set_label)
-    watcher.initialize()
-
     loop = GLib.MainLoop()
 
     def _shutdown(*_args):
         watcher.close()
         overlay.close()
         loop.quit()
+
+    tray = TrayIndicator(on_quit=_shutdown)
+
+    def on_label_changed(label: str):
+        overlay.set_label(label)
+        tray.set_label(label)
+
+    ibus_bus = IBus.Bus()
+    watcher = IBusWatcher(ibus_bus, on_label_changed)
+    watcher.initialize()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)

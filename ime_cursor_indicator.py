@@ -10,12 +10,14 @@ import argparse
 import signal
 from dataclasses import dataclass
 
+import cairo
 import gi
 
 gi.require_version("IBus", "1.0")
-from gi.repository import GLib, IBus
+gi.require_version("Pango", "1.0")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import GLib, IBus, Pango, PangoCairo
 from Xlib import X, Xatom, display
-from Xlib.error import BadName
 
 
 @dataclass
@@ -174,18 +176,14 @@ class OverlayWindow:
         self._set_window_hints()
         self._set_opacity(self.opacity)
 
-        self.font = self._load_font(
-            [
-                "-misc-fixed-bold-r-normal--20-*-*-*-*-*-iso10646-1",
-                "-misc-fixed-medium-r-normal--20-*-*-*-*-*-iso10646-1",
-                "fixed",
-            ]
-        )
+        self._check_pixmap_format()
+
+        self.font_desc = Pango.FontDescription("Sans Bold 16")
         self.gc = self.window.create_gc(
             foreground=self.screen.white_pixel,
             background=self.screen.black_pixel,
-            font=self.font,
         )
+        self._surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
 
         self.window.map()
         self.display.flush()
@@ -213,13 +211,17 @@ class OverlayWindow:
         value = int(0xFFFFFFFF * opacity)
         self.window.change_property(atom, atom_type("CARDINAL"), 32, [value])
 
-    def _load_font(self, names):
-        for name in names:
-            try:
-                return self.display.open_font(name)
-            except BadName:
-                continue
-        return self.display.open_font("fixed")
+    def _check_pixmap_format(self):
+        depth = self.screen.root_depth
+        for fmt in self.display.display.info.pixmap_formats:
+            if fmt.depth == depth:
+                if fmt.bits_per_pixel != 32:
+                    raise RuntimeError(
+                        f"Unsupported pixmap format: depth={depth}, "
+                        f"bpp={fmt.bits_per_pixel} (expected 32)"
+                    )
+                return
+        raise RuntimeError(f"No pixmap format found for depth {depth}")
 
     def set_label(self, label: str):
         if label == self.label:
@@ -228,11 +230,29 @@ class OverlayWindow:
         self.redraw()
 
     def redraw(self):
-        self.window.clear_area()
-        # Keep text centered enough for compact labels like "A" / "あ".
-        text_x = max(4, self.width // 3)
-        text_y = int(self.height * 0.72)
-        self.window.draw_text(self.gc, text_x, text_y, self.label)
+        # Render label via Cairo + Pango onto an ImageSurface.
+        ctx = cairo.Context(self._surface)
+        # Black background
+        ctx.set_source_rgb(0, 0, 0)
+        ctx.paint()
+        # White text
+        layout = PangoCairo.create_layout(ctx)
+        layout.set_font_description(self.font_desc)
+        layout.set_text(self.label, -1)
+        # Center the text in the window
+        _ink_rect, logical_rect = layout.get_pixel_extents()
+        text_x = (self.width - logical_rect.width) // 2 - logical_rect.x
+        text_y = (self.height - logical_rect.height) // 2 - logical_rect.y
+        ctx.move_to(text_x, text_y)
+        ctx.set_source_rgb(1, 1, 1)
+        PangoCairo.show_layout(ctx, layout)
+        # Transfer pixel data to the X11 window
+        self._surface.flush()
+        buf = bytes(self._surface.get_data())
+        self.window.put_image(
+            self.gc, 0, 0, self.width, self.height, X.ZPixmap,
+            self.screen.root_depth, 0, buf,
+        )
         self.display.flush()
 
     def tick(self):

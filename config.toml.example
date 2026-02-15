@@ -6,3 +6,15 @@ offset_y = 18
 width = 34
 height = 34
 opacity = 0.70
+
+# Per-mode overrides (Japanese input ON)
+[on]
+width = 34
+height = 34
+opacity = 0.85
+
+# Per-mode overrides (Japanese input OFF)
+[off]
+width = 24
+height = 24
+opacity = 0.30

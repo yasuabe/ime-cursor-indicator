@@ -30,6 +30,15 @@ from Xlib import X, Xatom, display
 
 
 @dataclass
+class OverlayStyle:
+    offset_x: int
+    offset_y: int
+    width: int
+    height: int
+    opacity: float
+
+
+@dataclass
 class IndicatorState:
     engine_name: str = ""
     label: str = "A"
@@ -151,22 +160,24 @@ class OverlayWindow:
         x_display,
         *,
         poll_ms: int,
-        offset_x: int,
-        offset_y: int,
-        width: int,
-        height: int,
-        opacity: float,
+        on_style: OverlayStyle,
+        off_style: OverlayStyle,
     ):
         self.display = x_display
         self.screen = self.display.screen()
         self.root = self.screen.root
         self.poll_ms = poll_ms
-        self.offset_x = offset_x
-        self.offset_y = offset_y
-        self.width = width
-        self.height = height
-        self.opacity = max(0.1, min(1.0, opacity))
+        self.on_style = on_style
+        self.off_style = off_style
         self.label = "A"
+
+        # Start with off_style
+        style = self.off_style
+        self.offset_x = style.offset_x
+        self.offset_y = style.offset_y
+        self.width = style.width
+        self.height = style.height
+        self.opacity = max(0.1, min(1.0, style.opacity))
 
         self.window = self.root.create_window(
             0,
@@ -237,6 +248,20 @@ class OverlayWindow:
         if label == self.label:
             return
         self.label = label
+        style = self.on_style if label == "あ" else self.off_style
+        self.offset_x = style.offset_x
+        self.offset_y = style.offset_y
+        new_opacity = max(0.1, min(1.0, style.opacity))
+        if new_opacity != self.opacity:
+            self.opacity = new_opacity
+            self._set_opacity(self.opacity)
+        if style.width != self.width or style.height != self.height:
+            self.width = style.width
+            self.height = style.height
+            self.window.configure(width=self.width, height=self.height)
+            self._surface = cairo.ImageSurface(
+                cairo.FORMAT_ARGB32, self.width, self.height
+            )
         self.redraw()
 
     def redraw(self):
@@ -353,6 +378,29 @@ _CONFIG_SCHEMA: dict[str, tuple[type, object]] = {
 }
 
 
+_STYLE_KEYS = {"offset_x", "offset_y", "width", "height", "opacity"}
+
+
+def _validate_section(raw: dict, section_name: str) -> dict:
+    """Validate keys against _CONFIG_SCHEMA types, returning valid entries."""
+    result: dict = {}
+    for key, (expected_type, default) in _CONFIG_SCHEMA.items():
+        if section_name and key not in _STYLE_KEYS:
+            continue
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, expected_type):
+            result[key] = value
+        elif expected_type is float and isinstance(value, int):
+            result[key] = float(value)
+        else:
+            label = f"[{section_name}].{key}" if section_name else f"'{key}'"
+            print(f"Warning: config {label} should be {expected_type.__name__}, "
+                  f"got {type(value).__name__}; using default ({default})")
+    return result
+
+
 def load_config() -> dict:
     path = Path.home() / ".config" / "ime-cursor-indicator" / "config.toml"
     if not path.exists():
@@ -363,18 +411,15 @@ def load_config() -> dict:
     except Exception as e:
         print(f"Warning: failed to load {path}: {e}", file=sys.stderr)
         return {}
-    config: dict = {}
-    for key, (expected_type, default) in _CONFIG_SCHEMA.items():
-        if key not in raw:
+    config = _validate_section(raw, "")
+    for section in ("on", "off"):
+        if section not in raw:
             continue
-        value = raw[key]
-        if isinstance(value, expected_type):
-            config[key] = value
-        elif expected_type is float and isinstance(value, int):
-            config[key] = float(value)
+        if isinstance(raw[section], dict):
+            config[section] = _validate_section(raw[section], section)
         else:
-            print(f"Warning: config '{key}' should be {expected_type.__name__}, "
-                  f"got {type(value).__name__}; using default ({default})")
+            print(f"Warning: config [{section}] should be a table, "
+                  f"got {type(raw[section]).__name__}; ignoring", file=sys.stderr)
     return config
 
 
@@ -389,11 +434,27 @@ def parse_args():
     parser.add_argument("--width", type=int, default=config.get("width", 34))
     parser.add_argument("--height", type=int, default=config.get("height", 34))
     parser.add_argument("--opacity", type=float, default=config.get("opacity", 0.70))
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Build base style from CLI args (which already incorporate top-level config)
+    base = {
+        "offset_x": args.offset_x,
+        "offset_y": args.offset_y,
+        "width": args.width,
+        "height": args.height,
+        "opacity": args.opacity,
+    }
+    # Override with [on]/[off] section values
+    on_vals = {**base, **config.get("on", {})}
+    off_vals = {**base, **config.get("off", {})}
+    on_style = OverlayStyle(**on_vals)
+    off_style = OverlayStyle(**off_vals)
+
+    return args, on_style, off_style
 
 
 def main():
-    args = parse_args()
+    args, on_style, off_style = parse_args()
 
     IBus.init()
 
@@ -401,11 +462,8 @@ def main():
     overlay = OverlayWindow(
         x_display,
         poll_ms=args.poll_ms,
-        offset_x=args.offset_x,
-        offset_y=args.offset_y,
-        width=args.width,
-        height=args.height,
-        opacity=args.opacity,
+        on_style=on_style,
+        off_style=off_style,
     )
 
     loop = GLib.MainLoop()

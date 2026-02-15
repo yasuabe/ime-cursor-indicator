@@ -7,7 +7,10 @@ Prototype implementation based on DESIGN.md.
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import signal
+import tempfile
 from dataclasses import dataclass
 
 import cairo
@@ -77,8 +80,9 @@ class IBusWatcher:
         conn = self.bus.get_connection()
         ic = IBus.InputContext.get_input_context(context_path, conn)
         if ic is None:
-            # Clear stale path so next tick retries binding this context.
+            # Clear stale state so next tick retries binding this context.
             self.current_context_path = ""
+            self.current_ic = None
             return
         self.current_ic = ic
         self.current_context_path = context_path
@@ -235,8 +239,11 @@ class OverlayWindow:
     def redraw(self):
         # Render label via Cairo + Pango onto an ImageSurface.
         ctx = cairo.Context(self._surface)
-        # Black background
-        ctx.set_source_rgb(0, 0, 0)
+        # Background: red when Japanese input is active, black otherwise
+        if self.label == "あ":
+            ctx.set_source_rgb(0.8, 0, 0)
+        else:
+            ctx.set_source_rgb(0, 0, 0)
         ctx.paint()
         # White text
         layout = PangoCairo.create_layout(ctx)
@@ -275,11 +282,16 @@ class OverlayWindow:
 
 class TrayIndicator:
     def __init__(self, on_quit):
+        self._icon_dir = tempfile.mkdtemp(prefix="ime-indicator-")
+        self._icon_a = self._create_icon((0, 0, 0), "icon_a.png")
+        self._icon_ja = self._create_icon((0.8, 0, 0), "icon_ja.png")
+
         self.indicator = AppIndicator3.Indicator.new(
             "ime-cursor-indicator",
-            "input-keyboard",
+            "icon_a",
             AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
         )
+        self.indicator.set_icon_theme_path(self._icon_dir)
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_label("A", "あ")
 
@@ -290,8 +302,24 @@ class TrayIndicator:
         menu.show_all()
         self.indicator.set_menu(menu)
 
+    def _create_icon(self, rgb, filename):
+        path = os.path.join(self._icon_dir, filename)
+        size = 22
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+        ctx = cairo.Context(surface)
+        ctx.set_source_rgb(*rgb)
+        ctx.arc(size / 2, size / 2, size / 2, 0, 2 * 3.14159)
+        ctx.fill()
+        surface.write_to_png(path)
+        return os.path.splitext(filename)[0]
+
     def set_label(self, label: str):
         self.indicator.set_label(label, "あ")
+        icon = self._icon_ja if label == "あ" else self._icon_a
+        self.indicator.set_icon_full(icon, label)
+
+    def close(self):
+        shutil.rmtree(self._icon_dir, ignore_errors=True)
 
 
 def atom_type(name: str) -> int:
@@ -336,6 +364,7 @@ def main():
     def _shutdown(*_args):
         watcher.close()
         overlay.close()
+        tray.close()
         loop.quit()
 
     tray = TrayIndicator(on_quit=_shutdown)

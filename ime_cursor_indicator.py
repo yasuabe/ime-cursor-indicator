@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""IME mode indicator near mouse cursor for Ubuntu/X11 + IBus.
+"""IME mode indicator near text caret for Ubuntu/X11 + IBus.
 
-Prototype implementation based on DESIGN.md.
+Tracks the caret position by eavesdropping on IBus SetCursorLocation
+method calls on the IBus private bus.
 """
 
 from __future__ import annotations
@@ -24,10 +25,11 @@ import gi
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("IBus", "1.0")
+gi.require_version("Gio", "2.0")
 gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
 gi.require_version("AyatanaAppIndicator3", "0.1")
-from gi.repository import Gdk, GLib, Gtk, IBus, Pango, PangoCairo
+from gi.repository import Gdk, Gio, GLib, Gtk, IBus, Pango, PangoCairo
 from gi.repository import AyatanaAppIndicator3 as AppIndicator3
 
 
@@ -44,6 +46,75 @@ class OverlayStyle:
 class IndicatorState:
     engine_name: str = ""
     label: str = "A"
+
+
+class CaretTracker:
+    """Eavesdrop on IBus SetCursorLocation to track the text caret position."""
+
+    _IC_IFACE = "org.freedesktop.IBus.InputContext"
+
+    def __init__(self, bus: IBus.Bus, on_cursor_moved):
+        self._bus = bus
+        self._on_cursor_moved = on_cursor_moved
+        self._last = (-1, -1, -1, -1)
+
+    def start(self):
+        conn = self._bus.get_connection()
+
+        match_rule = (
+            "eavesdrop=true,"
+            "type='method_call',"
+            f"interface='{self._IC_IFACE}',"
+            "member='SetCursorLocation'"
+        )
+        try:
+            conn.call_sync(
+                "org.freedesktop.DBus",
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                "AddMatch",
+                GLib.Variant("(s)", (match_rule,)),
+                None,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+            )
+        except Exception as exc:
+            print(f"Warning: AddMatch for SetCursorLocation failed: {exc}",
+                  file=sys.stderr)
+            return
+        conn.add_filter(self._message_filter)
+
+    def _message_filter(self, connection, message, incoming):
+        if not incoming:
+            return message
+
+        if message.get_member() != "SetCursorLocation":
+            return message
+        if message.get_interface() != self._IC_IFACE:
+            return message
+
+        body = message.get_body()
+        if body is None or body.n_children() < 4:
+            return message
+
+        x = body.get_child_value(0).get_int32()
+        y = body.get_child_value(1).get_int32()
+        w = body.get_child_value(2).get_int32()
+        h = body.get_child_value(3).get_int32()
+
+        # (0,0,0,0) is a focus-loss reset; ignore it
+        if x == 0 and y == 0 and w == 0 and h == 0:
+            return message
+
+        # Deduplicate
+        coords = (x, y, w, h)
+        if coords == self._last:
+            return message
+        self._last = coords
+
+        GLib.idle_add(self._on_cursor_moved, x, y, w, h)
+        return message
 
 
 class IBusWatcher:
@@ -160,14 +231,14 @@ class OverlayWindow:
     def __init__(
         self,
         *,
-        poll_ms: int,
         on_style: OverlayStyle,
         off_style: OverlayStyle,
     ):
-        self.poll_ms = poll_ms
         self.on_style = on_style
         self.off_style = off_style
         self.label = "A"
+        self._visible = False
+        self._caret_known = False
 
         # Start with off_style
         style = self.off_style
@@ -196,7 +267,8 @@ class OverlayWindow:
             self.window.set_visual(visual)
 
         self.window.connect("draw", self._on_draw)
-        self.window.show_all()
+        # Start hidden; shown when IME is on and caret position is known
+        self.window.realize()
 
     def _on_draw(self, widget, ctx):
         # Clear to fully transparent
@@ -252,19 +324,28 @@ class OverlayWindow:
     def redraw(self):
         self.window.queue_draw()
 
-    def tick(self):
+    def move_to_caret(self, cx, cy, cw, ch):
+        """Position the overlay relative to the caret rectangle."""
+        self._caret_known = True
         display = Gdk.Display.get_default()
-        seat = display.get_default_seat()
-        pointer = seat.get_pointer()
-        screen, px, py = pointer.get_position()
-        monitor = display.get_monitor_at_point(px, py)
+        monitor = display.get_monitor_at_point(cx, cy)
         geom = monitor.get_geometry()
-        x = px + self.offset_x
-        y = py + self.offset_y
+        x = cx + self.offset_x
+        y = cy + ch + self.offset_y
         x = max(geom.x, min(x, geom.x + geom.width - self.width))
         y = max(geom.y, min(y, geom.y + geom.height - self.height))
         self.window.move(x, y)
-        return True
+        if self._visible and not self.window.get_visible():
+            self.window.show_all()
+
+    def show(self):
+        self._visible = True
+        if self._caret_known:
+            self.window.show_all()
+
+    def hide(self):
+        self._visible = False
+        self.window.hide()
 
     def close(self):
         self.window.destroy()
@@ -412,7 +493,6 @@ def main():
     IBus.init()
 
     overlay = OverlayWindow(
-        poll_ms=args.poll_ms,
         on_style=on_style,
         off_style=off_style,
     )
@@ -430,15 +510,24 @@ def main():
     def on_label_changed(label: str):
         overlay.set_label(label)
         tray.set_label(label)
+        if label == "あ":
+            overlay.show()
+        else:
+            overlay.hide()
 
     ibus_bus = IBus.Bus()
     watcher = IBusWatcher(ibus_bus, on_label_changed)
     watcher.initialize()
 
+    def on_cursor_moved(x, y, w, h):
+        overlay.move_to_caret(x, y, w, h)
+
+    caret_tracker = CaretTracker(ibus_bus, on_cursor_moved)
+    caret_tracker.start()
+
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    GLib.timeout_add(args.poll_ms, overlay.tick)
     GLib.timeout_add(500, watcher.tick)
     loop.run()
 

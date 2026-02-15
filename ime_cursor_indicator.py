@@ -8,6 +8,7 @@ method calls on the IBus private bus.
 from __future__ import annotations
 
 import argparse
+import time
 import os
 import shutil
 import signal
@@ -53,9 +54,10 @@ class CaretTracker:
 
     _IC_IFACE = "org.freedesktop.IBus.InputContext"
 
-    def __init__(self, bus: IBus.Bus, on_cursor_moved):
+    def __init__(self, bus: IBus.Bus, on_cursor_moved, on_cursor_lost):
         self._bus = bus
         self._on_cursor_moved = on_cursor_moved
+        self._on_cursor_lost = on_cursor_lost
         self._last = (-1, -1, -1, -1)
 
     def start(self):
@@ -105,6 +107,8 @@ class CaretTracker:
 
         # (0,0,0,0) is a focus-loss reset; ignore it
         if x == 0 and y == 0 and w == 0 and h == 0:
+            self._last = (-1, -1, -1, -1)
+            GLib.idle_add(self._on_cursor_lost)
             return message
 
         # Deduplicate
@@ -228,6 +232,8 @@ class IBusWatcher:
 
 
 class OverlayWindow:
+    _CARET_STALE_SEC = 1.2
+
     def __init__(
         self,
         *,
@@ -239,6 +245,7 @@ class OverlayWindow:
         self.label = "A"
         self._visible = False
         self._caret_known = False
+        self._last_caret_update = 0.0
 
         # Start with off_style
         style = self.off_style
@@ -327,6 +334,7 @@ class OverlayWindow:
     def move_to_caret(self, cx, cy, cw, ch):
         """Position the overlay relative to the caret rectangle."""
         self._caret_known = True
+        self._last_caret_update = time.monotonic()
         display = Gdk.Display.get_default()
         monitor = display.get_monitor_at_point(cx, cy)
         geom = monitor.get_geometry()
@@ -338,14 +346,47 @@ class OverlayWindow:
         if self._visible and not self.window.get_visible():
             self.window.show_all()
 
+    def _move_to_pointer(self):
+        display = Gdk.Display.get_default()
+        seat = display.get_default_seat()
+        pointer = seat.get_pointer()
+        screen, px, py = pointer.get_position()
+        monitor = display.get_monitor_at_point(px, py)
+        geom = monitor.get_geometry()
+        x = px + self.offset_x
+        y = py + self.offset_y
+        x = max(geom.x, min(x, geom.x + geom.width - self.width))
+        y = max(geom.y, min(y, geom.y + geom.height - self.height))
+        self.window.move(x, y)
+
     def show(self):
         self._visible = True
-        if self._caret_known:
-            self.window.show_all()
+        if not self._caret_known:
+            self._move_to_pointer()
+        self.window.show_all()
 
     def hide(self):
         self._visible = False
         self.window.hide()
+
+    def mark_caret_lost(self):
+        self._caret_known = False
+        self._last_caret_update = 0.0
+        if self._visible:
+            self._move_to_pointer()
+            if not self.window.get_visible():
+                self.window.show_all()
+
+    def tick_pointer(self):
+        if (
+            self._visible
+            and self._caret_known
+            and (time.monotonic() - self._last_caret_update) > self._CARET_STALE_SEC
+        ):
+            self.mark_caret_lost()
+        if self._visible and not self._caret_known:
+            self._move_to_pointer()
+        return True
 
     def close(self):
         self.window.destroy()
@@ -522,12 +563,17 @@ def main():
     def on_cursor_moved(x, y, w, h):
         overlay.move_to_caret(x, y, w, h)
 
-    caret_tracker = CaretTracker(ibus_bus, on_cursor_moved)
+    def on_cursor_lost():
+        overlay.mark_caret_lost()
+        return False
+
+    caret_tracker = CaretTracker(ibus_bus, on_cursor_moved, on_cursor_lost)
     caret_tracker.start()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
+    GLib.timeout_add(args.poll_ms, overlay.tick_pointer)
     GLib.timeout_add(500, watcher.tick)
     loop.run()
 

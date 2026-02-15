@@ -16,17 +16,19 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+import math
+
 import cairo
 import gi
 
+gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("IBus", "1.0")
 gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
 gi.require_version("AyatanaAppIndicator3", "0.1")
-from gi.repository import GLib, Gtk, IBus, Pango, PangoCairo
+from gi.repository import Gdk, GLib, Gtk, IBus, Pango, PangoCairo
 from gi.repository import AyatanaAppIndicator3 as AppIndicator3
-from Xlib import X, Xatom, display
 
 
 @dataclass
@@ -157,15 +159,11 @@ class IBusWatcher:
 class OverlayWindow:
     def __init__(
         self,
-        x_display,
         *,
         poll_ms: int,
         on_style: OverlayStyle,
         off_style: OverlayStyle,
     ):
-        self.display = x_display
-        self.screen = self.display.screen()
-        self.root = self.screen.root
         self.poll_ms = poll_ms
         self.on_style = on_style
         self.off_style = off_style
@@ -179,70 +177,63 @@ class OverlayWindow:
         self.height = style.height
         self.opacity = max(0.1, min(1.0, style.opacity))
 
-        self.window = self.root.create_window(
-            0,
-            0,
-            self.width,
-            self.height,
-            0,
-            self.screen.root_depth,
-            X.InputOutput,
-            X.CopyFromParent,
-            background_pixel=self.screen.black_pixel,
-            border_pixel=self.screen.black_pixel,
-            override_redirect=True,
-            event_mask=(X.ExposureMask),
-        )
-
-        self._set_window_hints()
-        self._set_opacity(self.opacity)
-
-        self._check_pixmap_format()
-
         self.font_desc = Pango.FontDescription("Sans Bold 16")
-        self.gc = self.window.create_gc(
-            foreground=self.screen.white_pixel,
-            background=self.screen.black_pixel,
-        )
-        self._surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
 
-        self.window.map()
-        self.display.flush()
-        self.redraw()
+        self.window = Gtk.Window(type=Gtk.WindowType.POPUP)
+        self.window.set_app_paintable(True)
+        self.window.set_decorated(False)
+        self.window.set_keep_above(True)
+        self.window.stick()
+        self.window.set_skip_taskbar_hint(True)
+        self.window.set_skip_pager_hint(True)
+        self.window.set_type_hint(Gdk.WindowTypeHint.NOTIFICATION)
+        self.window.set_default_size(self.width, self.height)
 
-    def _set_window_hints(self):
-        wm_type = self.display.intern_atom("_NET_WM_WINDOW_TYPE")
-        wm_type_notification = self.display.intern_atom("_NET_WM_WINDOW_TYPE_NOTIFICATION")
-        wm_state = self.display.intern_atom("_NET_WM_STATE")
-        wm_state_above = self.display.intern_atom("_NET_WM_STATE_ABOVE")
-        wm_state_sticky = self.display.intern_atom("_NET_WM_STATE_STICKY")
-        wm_state_skip_taskbar = self.display.intern_atom("_NET_WM_STATE_SKIP_TASKBAR")
-        wm_state_skip_pager = self.display.intern_atom("_NET_WM_STATE_SKIP_PAGER")
+        # Enable per-pixel alpha via RGBA visual
+        screen = self.window.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.window.set_visual(visual)
 
-        self.window.change_property(wm_type, atom_type("ATOM"), 32, [wm_type_notification])
-        self.window.change_property(
-            wm_state,
-            atom_type("ATOM"),
-            32,
-            [wm_state_above, wm_state_sticky, wm_state_skip_taskbar, wm_state_skip_pager],
-        )
+        self.window.connect("draw", self._on_draw)
+        self.window.show_all()
 
-    def _set_opacity(self, opacity: float):
-        atom = self.display.intern_atom("_NET_WM_WINDOW_OPACITY")
-        value = int(0xFFFFFFFF * opacity)
-        self.window.change_property(atom, atom_type("CARDINAL"), 32, [value])
+    def _on_draw(self, widget, ctx):
+        # Clear to fully transparent
+        ctx.set_operator(cairo.OPERATOR_SOURCE)
+        ctx.set_source_rgba(0, 0, 0, 0)
+        ctx.paint()
+        ctx.set_operator(cairo.OPERATOR_OVER)
 
-    def _check_pixmap_format(self):
-        depth = self.screen.root_depth
-        for fmt in self.display.display.info.pixmap_formats:
-            if fmt.depth == depth:
-                if fmt.bits_per_pixel != 32:
-                    raise RuntimeError(
-                        f"Unsupported pixmap format: depth={depth}, "
-                        f"bpp={fmt.bits_per_pixel} (expected 32)"
-                    )
-                return
-        raise RuntimeError(f"No pixmap format found for depth {depth}")
+        # Draw rounded rectangle background
+        r = min(self.width, self.height) * 0.32
+        self._rounded_rect(ctx, 0, 0, self.width, self.height, r)
+        if self.label == "あ":
+            ctx.set_source_rgba(0.8, 0, 0, self.opacity)
+        else:
+            ctx.set_source_rgba(0, 0, 0, self.opacity)
+        ctx.fill()
+
+        # Draw centered text
+        layout = PangoCairo.create_layout(ctx)
+        layout.set_font_description(self.font_desc)
+        layout.set_text(self.label, -1)
+        _ink, logical = layout.get_pixel_extents()
+        tx = (self.width - logical.width) // 2 - logical.x
+        ty = (self.height - logical.height) // 2 - logical.y
+        ctx.move_to(tx, ty)
+        ctx.set_source_rgba(1, 1, 1, 1)
+        PangoCairo.show_layout(ctx, layout)
+        return True
+
+    @staticmethod
+    def _rounded_rect(ctx, x, y, w, h, r):
+        ctx.new_sub_path()
+        ctx.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        ctx.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        ctx.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        ctx.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+        ctx.close_path()
 
     def set_label(self, label: str):
         if label == self.label:
@@ -251,62 +242,32 @@ class OverlayWindow:
         style = self.on_style if label == "あ" else self.off_style
         self.offset_x = style.offset_x
         self.offset_y = style.offset_y
-        new_opacity = max(0.1, min(1.0, style.opacity))
-        if new_opacity != self.opacity:
-            self.opacity = new_opacity
-            self._set_opacity(self.opacity)
+        self.opacity = max(0.1, min(1.0, style.opacity))
         if style.width != self.width or style.height != self.height:
             self.width = style.width
             self.height = style.height
-            self.window.configure(width=self.width, height=self.height)
-            self._surface = cairo.ImageSurface(
-                cairo.FORMAT_ARGB32, self.width, self.height
-            )
+            self.window.resize(self.width, self.height)
         self.redraw()
 
     def redraw(self):
-        # Render label via Cairo + Pango onto an ImageSurface.
-        ctx = cairo.Context(self._surface)
-        # Background: red when Japanese input is active, black otherwise
-        if self.label == "あ":
-            ctx.set_source_rgb(0.8, 0, 0)
-        else:
-            ctx.set_source_rgb(0, 0, 0)
-        ctx.paint()
-        # White text
-        layout = PangoCairo.create_layout(ctx)
-        layout.set_font_description(self.font_desc)
-        layout.set_text(self.label, -1)
-        # Center the text in the window
-        _ink_rect, logical_rect = layout.get_pixel_extents()
-        text_x = (self.width - logical_rect.width) // 2 - logical_rect.x
-        text_y = (self.height - logical_rect.height) // 2 - logical_rect.y
-        ctx.move_to(text_x, text_y)
-        ctx.set_source_rgb(1, 1, 1)
-        PangoCairo.show_layout(ctx, layout)
-        # Transfer pixel data to the X11 window
-        self._surface.flush()
-        buf = bytes(self._surface.get_data())
-        self.window.put_image(
-            self.gc, 0, 0, self.width, self.height, X.ZPixmap,
-            self.screen.root_depth, 0, buf,
-        )
-        self.display.flush()
+        self.window.queue_draw()
 
     def tick(self):
-        pointer = self.root.query_pointer()
-        x = int(pointer.root_x + self.offset_x)
-        y = int(pointer.root_y + self.offset_y)
-        x = max(0, min(x, self.screen.width_in_pixels - self.width))
-        y = max(0, min(y, self.screen.height_in_pixels - self.height))
-        self.window.configure(x=x, y=y)
-        self.display.flush()
+        display = Gdk.Display.get_default()
+        seat = display.get_default_seat()
+        pointer = seat.get_pointer()
+        screen, px, py = pointer.get_position()
+        monitor = display.get_monitor_at_point(px, py)
+        geom = monitor.get_geometry()
+        x = px + self.offset_x
+        y = py + self.offset_y
+        x = max(geom.x, min(x, geom.x + geom.width - self.width))
+        y = max(geom.y, min(y, geom.y + geom.height - self.height))
+        self.window.move(x, y)
         return True
 
     def close(self):
-        self.window.unmap()
         self.window.destroy()
-        self.display.flush()
 
 class TrayIndicator:
     def __init__(self, on_quit):
@@ -358,14 +319,6 @@ class TrayIndicator:
 
     def close(self):
         shutil.rmtree(self._icon_dir, ignore_errors=True)
-
-
-def atom_type(name: str) -> int:
-    if name == "ATOM":
-        return Xatom.ATOM
-    if name == "CARDINAL":
-        return Xatom.CARDINAL
-    raise ValueError(f"unsupported atom type: {name}")
 
 
 _CONFIG_SCHEMA: dict[str, tuple[type, object]] = {
@@ -458,9 +411,7 @@ def main():
 
     IBus.init()
 
-    x_display = display.Display()
     overlay = OverlayWindow(
-        x_display,
         poll_ms=args.poll_ms,
         on_style=on_style,
         off_style=off_style,

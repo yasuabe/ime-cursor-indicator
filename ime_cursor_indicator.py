@@ -283,8 +283,8 @@ class OverlayWindow:
 class TrayIndicator:
     def __init__(self, on_quit):
         self._icon_dir = tempfile.mkdtemp(prefix="ime-indicator-")
-        self._icon_a = self._create_icon((0, 0, 0), "icon_a.png")
-        self._icon_ja = self._create_icon((0.8, 0, 0), "icon_ja.png")
+        self._icon_a = self._create_icon((0, 0, 0), "A", "icon_a.png")
+        self._icon_ja = self._create_icon((0.8, 0, 0), "あ", "icon_ja.png")
 
         self.indicator = AppIndicator3.Indicator.new(
             "ime-cursor-indicator",
@@ -293,7 +293,7 @@ class TrayIndicator:
         )
         self.indicator.set_icon_theme_path(self._icon_dir)
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
-        self.indicator.set_label("A", "あ")
+        self.indicator.set_label("", "")
 
         menu = Gtk.Menu()
         item_quit = Gtk.MenuItem(label="Quit")
@@ -302,19 +302,29 @@ class TrayIndicator:
         menu.show_all()
         self.indicator.set_menu(menu)
 
-    def _create_icon(self, rgb, filename):
+    def _create_icon(self, rgb, label, filename):
         path = os.path.join(self._icon_dir, filename)
         size = 22
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
         ctx = cairo.Context(surface)
+        # Background circle
         ctx.set_source_rgb(*rgb)
         ctx.arc(size / 2, size / 2, size / 2, 0, 2 * 3.14159)
         ctx.fill()
+        # White label text
+        layout = PangoCairo.create_layout(ctx)
+        layout.set_font_description(Pango.FontDescription("Sans Bold 14"))
+        layout.set_text(label, -1)
+        _ink, logical = layout.get_pixel_extents()
+        tx = (size - logical.width) / 2 - logical.x
+        ty = (size - logical.height) / 2 - logical.y
+        ctx.move_to(tx, ty)
+        ctx.set_source_rgb(1, 1, 1)
+        PangoCairo.show_layout(ctx, layout)
         surface.write_to_png(path)
         return os.path.splitext(filename)[0]
 
     def set_label(self, label: str):
-        self.indicator.set_label(label, "あ")
         icon = self._icon_ja if label == "あ" else self._icon_a
         self.indicator.set_icon_full(icon, label)
 

@@ -10,8 +10,11 @@ import argparse
 import os
 import shutil
 import signal
+import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 
 import cairo
 import gi
@@ -340,16 +343,52 @@ def atom_type(name: str) -> int:
     raise ValueError(f"unsupported atom type: {name}")
 
 
+_CONFIG_SCHEMA: dict[str, tuple[type, object]] = {
+    "poll_ms": (int, 75),
+    "offset_x": (int, 20),
+    "offset_y": (int, 18),
+    "width": (int, 34),
+    "height": (int, 34),
+    "opacity": (float, 0.70),
+}
+
+
+def load_config() -> dict:
+    path = Path.home() / ".config" / "ime-cursor-indicator" / "config.toml"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except Exception as e:
+        print(f"Warning: failed to load {path}: {e}", file=sys.stderr)
+        return {}
+    config: dict = {}
+    for key, (expected_type, default) in _CONFIG_SCHEMA.items():
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, expected_type):
+            config[key] = value
+        elif expected_type is float and isinstance(value, int):
+            config[key] = float(value)
+        else:
+            print(f"Warning: config '{key}' should be {expected_type.__name__}, "
+                  f"got {type(value).__name__}; using default ({default})")
+    return config
+
+
 def parse_args():
+    config = load_config()
     parser = argparse.ArgumentParser(
         description="Show IME status indicator near cursor on Ubuntu/X11 + IBus"
     )
-    parser.add_argument("--poll-ms", type=int, default=75, help="cursor polling interval")
-    parser.add_argument("--offset-x", type=int, default=20, help="x offset from cursor")
-    parser.add_argument("--offset-y", type=int, default=18, help="y offset from cursor")
-    parser.add_argument("--width", type=int, default=34)
-    parser.add_argument("--height", type=int, default=34)
-    parser.add_argument("--opacity", type=float, default=0.70)
+    parser.add_argument("--poll-ms", type=int, default=config.get("poll_ms", 75), help="cursor polling interval")
+    parser.add_argument("--offset-x", type=int, default=config.get("offset_x", 20), help="x offset from cursor")
+    parser.add_argument("--offset-y", type=int, default=config.get("offset_y", 18), help="y offset from cursor")
+    parser.add_argument("--width", type=int, default=config.get("width", 34))
+    parser.add_argument("--height", type=int, default=config.get("height", 34))
+    parser.add_argument("--opacity", type=float, default=config.get("opacity", 0.70))
     return parser.parse_args()
 
 

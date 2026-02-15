@@ -35,6 +35,25 @@ python3 ime_cursor_indicator.py
 python3 ime_cursor_indicator.py --poll-ms 60 --opacity 0.8 --offset-x 24 --offset-y 16
 ```
 
+### 設定ファイル
+
+`~/.config/ime-cursor-indicator/config.toml` に設定を記述すると、デフォルト値を変更できます。
+
+```bash
+mkdir -p ~/.config/ime-cursor-indicator
+cp config.toml.example ~/.config/ime-cursor-indicator/config.toml
+```
+
+設定例:
+
+```toml
+poll_ms = 60
+opacity = 0.8
+offset_x = 24
+```
+
+優先順位: コマンドライン引数 > 設定ファイル > ハードコードデフォルト
+
 ### 注意
 
 - Mozc のモード判定は IBus プロパティ構造の差異を吸収するため、best-effort の解析です。

@@ -1,0 +1,8 @@
+# ~/.config/ime-cursor-indicator/config.toml
+
+poll_ms = 75
+offset_x = 20
+offset_y = 18
+width = 34
+height = 34
+opacity = 0.70

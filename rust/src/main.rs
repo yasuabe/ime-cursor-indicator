@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::f64::consts::PI;
 use std::fs;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gdk::prelude::*;
 use gtk::prelude::*;
@@ -11,6 +12,16 @@ struct OverlayState {
     width: i32,
     height: i32,
     opacity: f64,
+    caret_x: i32,
+    caret_y: i32,
+    caret_h: i32,
+    caret_known: bool,
+    offset_x: i32,
+    offset_y: i32,
+    poll_ms: u64,
+    pointer_poll_source: Option<glib::SourceId>,
+    last_window_x: i32,
+    last_window_y: i32,
 }
 
 fn rounded_rect(ctx: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -133,6 +144,156 @@ fn extract_property_key_and_symbol(params: &glib::Variant) -> Option<(String, St
     Some((key, symbol))
 }
 
+fn clamp_to_monitor(
+    display: &gdk::Display,
+    anchor_x: i32,
+    anchor_y: i32,
+    target_x: i32,
+    target_y: i32,
+    width: i32,
+    height: i32,
+) -> (i32, i32) {
+    if let Some(monitor) = display
+        .monitor_at_point(anchor_x, anchor_y)
+        .or_else(|| display.primary_monitor())
+        .or_else(|| display.monitor(0))
+    {
+        let geom = monitor.geometry();
+        let x = target_x.clamp(geom.x(), geom.x() + geom.width() - width);
+        let y = target_y.clamp(geom.y(), geom.y() + geom.height() - height);
+        (x, y)
+    } else {
+        (target_x, target_y)
+    }
+}
+
+fn move_overlay_if_changed(
+    state: &Rc<RefCell<OverlayState>>,
+    window: &gtk::Window,
+    anchor_x: i32,
+    anchor_y: i32,
+    target_x: i32,
+    target_y: i32,
+) {
+    let (next_x, next_y) = if let Some(display) = gdk::Display::default() {
+        let st = state.borrow();
+        clamp_to_monitor(&display, anchor_x, anchor_y, target_x, target_y, st.width, st.height)
+    } else {
+        (target_x, target_y)
+    };
+
+    let mut st = state.borrow_mut();
+    if st.last_window_x == next_x && st.last_window_y == next_y {
+        return;
+    }
+    st.last_window_x = next_x;
+    st.last_window_y = next_y;
+    drop(st);
+    window.move_(next_x, next_y);
+}
+
+fn move_to_pointer(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window) {
+    let (offset_x, offset_y) = {
+        let st = state.borrow();
+        (st.offset_x, st.offset_y)
+    };
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
+    let Some(seat) = display.default_seat() else {
+        return;
+    };
+    let Some(pointer) = seat.pointer() else {
+        return;
+    };
+
+    let (_, px, py) = pointer.position();
+    move_overlay_if_changed(state, window, px, py, px + offset_x, py + offset_y);
+}
+
+fn stop_pointer_poll(state: &Rc<RefCell<OverlayState>>) {
+    let source = state.borrow_mut().pointer_poll_source.take();
+    if let Some(source) = source {
+        source.remove();
+    }
+}
+
+fn start_pointer_poll(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window) {
+    let (should_start, poll_ms) = {
+        let st = state.borrow();
+        (
+            st.pointer_poll_source.is_none() && !st.caret_known && st.label != "A",
+            st.poll_ms.max(1),
+        )
+    };
+    if !should_start {
+        return;
+    }
+
+    let state_poll = Rc::clone(state);
+    let window_poll = window.clone();
+    let source = glib::timeout_add_local(Duration::from_millis(poll_ms), move || {
+        let should_continue = {
+            let st = state_poll.borrow();
+            !st.caret_known && st.label != "A"
+        };
+        if !should_continue {
+            state_poll.borrow_mut().pointer_poll_source = None;
+            return glib::ControlFlow::Break;
+        }
+        move_to_pointer(&state_poll, &window_poll);
+        glib::ControlFlow::Continue
+    });
+    state.borrow_mut().pointer_poll_source = Some(source);
+}
+
+fn mark_caret_unknown(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window) {
+    {
+        let mut st = state.borrow_mut();
+        st.caret_known = false;
+    }
+    if state.borrow().label != "A" {
+        move_to_pointer(state, window);
+        start_pointer_poll(state, window);
+        if !window.is_visible() {
+            window.show_all();
+        }
+    }
+}
+
+fn move_to_caret(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window, x: i32, y: i32, h: i32) {
+    let (offset_x, offset_y) = {
+        let mut st = state.borrow_mut();
+        st.caret_x = x;
+        st.caret_y = y;
+        st.caret_h = h;
+        st.caret_known = true;
+        (st.offset_x, st.offset_y)
+    };
+    stop_pointer_poll(state);
+    move_overlay_if_changed(state, window, x, y, x + offset_x, y + h + offset_y);
+    if state.borrow().label != "A" && !window.is_visible() {
+        window.show_all();
+    }
+}
+
+fn add_match_rule(conn: &gio::DBusConnection, rule: &str) {
+    let match_rule = glib::Variant::tuple_from_iter([rule.to_variant()]);
+    if let Err(err) = conn.call_sync(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "AddMatch",
+        Some(&match_rule),
+        None,
+        gio::DBusCallFlags::NONE,
+        -1,
+        None::<&gio::Cancellable>,
+    ) {
+        eprintln!("Warning: AddMatch failed for {}: {}", rule, err);
+    }
+}
+
 fn update_label(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window, label: &str) {
     {
         let mut st = state.borrow_mut();
@@ -142,8 +303,19 @@ fn update_label(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window, label: 
         st.label = label.to_string();
     }
     if label == "A" {
+        stop_pointer_poll(state);
         window.hide();
     } else {
+        if state.borrow().caret_known {
+            let (x, y, h) = {
+                let st = state.borrow();
+                (st.caret_x, st.caret_y, st.caret_h)
+            };
+            move_to_caret(state, window, x, y, h);
+        } else {
+            move_to_pointer(state, window);
+            start_pointer_poll(state, window);
+        }
         window.show_all();
         window.queue_draw();
     }
@@ -190,22 +362,31 @@ fn setup_ibus(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window) {
         }
     }
 
-    // Add eavesdrop match rule for UpdateProperty
-    let match_rule = glib::Variant::tuple_from_iter([
-        "eavesdrop=true,type='signal',interface='org.freedesktop.IBus.InputContext',member='UpdateProperty'"
-            .to_variant(),
-    ]);
-    let _ = conn.call_sync(
-        Some("org.freedesktop.DBus"),
-        "/org/freedesktop/DBus",
-        "org.freedesktop.DBus",
-        "AddMatch",
-        Some(&match_rule),
-        None,
-        gio::DBusCallFlags::NONE,
-        -1,
-        None::<&gio::Cancellable>,
+    // Add eavesdrop match rules for InputContext signals/method calls.
+    add_match_rule(
+        &conn,
+        "eavesdrop=true,type='signal',interface='org.freedesktop.IBus.InputContext',member='UpdateProperty'",
     );
+    add_match_rule(
+        &conn,
+        "eavesdrop=true,type='method_call',interface='org.freedesktop.IBus.InputContext',member='SetCursorLocation'",
+    );
+    for member in ["FocusIn", "FocusOut"] {
+        add_match_rule(
+            &conn,
+            &format!(
+                "eavesdrop=true,type='method_call',interface='org.freedesktop.IBus.InputContext',member='{}'",
+                member
+            ),
+        );
+        add_match_rule(
+            &conn,
+            &format!(
+                "eavesdrop=true,type='signal',interface='org.freedesktop.IBus.InputContext',member='{}'",
+                member
+            ),
+        );
+    }
 
     // Subscribe to GlobalEngineChanged
     let state_eng = Rc::clone(state);
@@ -245,6 +426,102 @@ fn setup_ibus(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window) {
         },
     );
 
+    let (caret_sender, caret_receiver) =
+        glib::MainContext::channel::<(i32, i32, i32, i32)>(glib::Priority::DEFAULT);
+    let state_caret_rx = Rc::clone(state);
+    let window_caret_rx = window.clone();
+    caret_receiver.attach(None, move |(x, y, w, h)| {
+        if x == 0 && y == 0 && w == 0 && h == 0 {
+            mark_caret_unknown(&state_caret_rx, &window_caret_rx);
+        } else {
+            move_to_caret(&state_caret_rx, &window_caret_rx, x, y, h);
+        }
+        glib::ControlFlow::Continue
+    });
+
+    // Track active context path to ignore noise from unfocused InputContexts.
+    let focused_ic_path = Rc::new(RefCell::new(None::<String>));
+    let last_cursor = Rc::new(RefCell::new((-1, -1, -1, -1)));
+
+    // Intercept InputContext method calls via filter (eavesdrop rules already added)
+    let caret_sender_filter = caret_sender.clone();
+    let focused_ic_path_filter = Rc::clone(&focused_ic_path);
+    let last_cursor_filter = Rc::clone(&last_cursor);
+    let _caret_filter_id = conn.add_filter(move |_conn, message, incoming| {
+        if !incoming {
+            return Some(message.clone());
+        }
+        if message.interface().as_deref() != Some("org.freedesktop.IBus.InputContext") {
+            return Some(message.clone());
+        }
+        let msg_type = message.message_type();
+        let is_method_or_signal =
+            msg_type == gio::DBusMessageType::MethodCall || msg_type == gio::DBusMessageType::Signal;
+        if !is_method_or_signal {
+            return Some(message.clone());
+        }
+
+        let path = message.path().map(|p| p.to_string());
+        let member = message.member();
+        let member = member.as_deref();
+        if member == Some("FocusIn") {
+            *focused_ic_path_filter.borrow_mut() = path;
+            return Some(message.clone());
+        }
+        if member == Some("FocusOut") {
+            if focused_ic_path_filter.borrow().as_deref() == path.as_deref() {
+                *focused_ic_path_filter.borrow_mut() = None;
+                *last_cursor_filter.borrow_mut() = (-1, -1, -1, -1);
+                let _ = caret_sender_filter.send((0, 0, 0, 0));
+            }
+            return Some(message.clone());
+        }
+        if member != Some("SetCursorLocation") {
+            return Some(message.clone());
+        }
+        if msg_type != gio::DBusMessageType::MethodCall {
+            return Some(message.clone());
+        }
+
+        if focused_ic_path_filter.borrow().is_none() {
+            *focused_ic_path_filter.borrow_mut() = path.clone();
+        }
+        if focused_ic_path_filter.borrow().as_deref() != path.as_deref() {
+            return Some(message.clone());
+        }
+
+        let Some(body) = message.body() else {
+            return Some(message.clone());
+        };
+        if body.n_children() < 4 {
+            return Some(message.clone());
+        }
+
+        let x = body.child_value(0).get::<i32>();
+        let y = body.child_value(1).get::<i32>();
+        let w = body.child_value(2).get::<i32>();
+        let h = body.child_value(3).get::<i32>();
+        let (Some(x), Some(y), Some(w), Some(h)) = (x, y, w, h) else {
+            return Some(message.clone());
+        };
+
+        if x == 0 && y == 0 && w == 0 && h == 0 {
+            *last_cursor_filter.borrow_mut() = (-1, -1, -1, -1);
+            let _ = caret_sender_filter.send((0, 0, 0, 0));
+            return Some(message.clone());
+        }
+
+        let coords = (x, y, w, h);
+        if *last_cursor_filter.borrow() == coords {
+            return Some(message.clone());
+        }
+        *last_cursor_filter.borrow_mut() = coords;
+
+        let _ = caret_sender_filter.send((x, y, w, h));
+
+        Some(message.clone())
+    });
+
     // Keep the connection alive for the lifetime of the program.
     // Leaking is intentional — the connection must outlive signal subscriptions.
     std::mem::forget(conn);
@@ -258,6 +535,16 @@ fn main() {
         width: 34,
         height: 34,
         opacity: 0.7,
+        caret_x: 0,
+        caret_y: 0,
+        caret_h: 0,
+        caret_known: false,
+        offset_x: 20,
+        offset_y: 18,
+        poll_ms: 75,
+        pointer_poll_source: None,
+        last_window_x: i32::MIN,
+        last_window_y: i32::MIN,
     }));
 
     let window = gtk::Window::new(gtk::WindowType::Popup);

@@ -13,7 +13,8 @@
 
 ## Verification
 
-- Always run `python3 -m py_compile ime_cursor_indicator.py` after changes
+- Python: Always run `python3 -m py_compile python/ime_cursor_indicator.py` after changes
+- Rust: Always run `cargo check` in `rust/` after changes
 
 ## TODO.md
 

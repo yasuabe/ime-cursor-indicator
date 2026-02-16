@@ -12,6 +12,10 @@ env/
 dist/
 build/
 
+# Rust
+rust/target/
+**/*.rs.bk
+
 # Editor / IDE
 .idea/
 .vscode/

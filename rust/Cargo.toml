@@ -1,0 +1,12 @@
+[package]
+name = "ime-cursor-indicator"
+edition = "2021"
+
+[dependencies]
+gtk = "0.18"
+gdk = "0.18"
+cairo-rs = "0.18"
+pango = "0.18"
+pangocairo = "0.18"
+glib = "0.18"
+libc = "0.2"

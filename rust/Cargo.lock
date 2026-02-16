@@ -476,6 +476,8 @@ version = "0.0.0"
 dependencies = [
  "cairo-rs",
  "clap",
+ "futures-channel",
+ "futures-util",
  "gdk",
  "gio",
  "glib",

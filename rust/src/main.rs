@@ -8,6 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use clap::Parser;
+use futures_channel::mpsc;
+use futures_util::stream::StreamExt;
 use gdk::prelude::*;
 use gtk::prelude::*;
 use libloading::Library;
@@ -120,10 +122,14 @@ struct IBusRuntime {
     conn: gio::DBusConnection,
     signal_ids: Vec<gio::SignalSubscriptionId>,
     filter_id: Option<gio::FilterId>,
+    caret_task: Option<glib::JoinHandle<()>>,
 }
 
 impl Drop for IBusRuntime {
     fn drop(&mut self) {
+        if let Some(task) = self.caret_task.take() {
+            task.abort();
+        }
         for id in self.signal_ids.drain(..) {
             self.conn.signal_unsubscribe(id);
         }
@@ -1093,17 +1099,17 @@ fn setup_ibus(
     );
     signal_ids.push(update_property_id);
 
-    let (caret_sender, caret_receiver) =
-        glib::MainContext::channel::<(i32, i32, i32, i32)>(glib::Priority::DEFAULT);
+    let (caret_sender, mut caret_receiver) = mpsc::unbounded::<(i32, i32, i32, i32)>();
     let state_caret_rx = Rc::clone(state);
     let window_caret_rx = window.clone();
-    caret_receiver.attach(None, move |(x, y, w, h)| {
-        if x == 0 && y == 0 && w == 0 && h == 0 {
-            mark_caret_unknown(&state_caret_rx, &window_caret_rx);
-        } else {
-            move_to_caret(&state_caret_rx, &window_caret_rx, x, y, h);
+    let caret_task = glib::spawn_future_local(async move {
+        while let Some((x, y, w, h)) = caret_receiver.next().await {
+            if x == 0 && y == 0 && w == 0 && h == 0 {
+                mark_caret_unknown(&state_caret_rx, &window_caret_rx);
+            } else {
+                move_to_caret(&state_caret_rx, &window_caret_rx, x, y, h);
+            }
         }
-        glib::ControlFlow::Continue
     });
 
     // Track active context path to ignore noise from unfocused InputContexts.
@@ -1139,7 +1145,7 @@ fn setup_ibus(
             if focused_ic_path_filter.borrow().as_deref() == path.as_deref() {
                 *focused_ic_path_filter.borrow_mut() = None;
                 *last_cursor_filter.borrow_mut() = (-1, -1, -1, -1);
-                let _ = caret_sender_filter.send((0, 0, 0, 0));
+                let _ = caret_sender_filter.unbounded_send((0, 0, 0, 0));
             }
             return Some(message.clone());
         }
@@ -1174,7 +1180,7 @@ fn setup_ibus(
 
         if x == 0 && y == 0 && w == 0 && h == 0 {
             *last_cursor_filter.borrow_mut() = (-1, -1, -1, -1);
-            let _ = caret_sender_filter.send((0, 0, 0, 0));
+            let _ = caret_sender_filter.unbounded_send((0, 0, 0, 0));
             return Some(message.clone());
         }
 
@@ -1184,7 +1190,7 @@ fn setup_ibus(
         }
         *last_cursor_filter.borrow_mut() = coords;
 
-        let _ = caret_sender_filter.send((x, y, w, h));
+        let _ = caret_sender_filter.unbounded_send((x, y, w, h));
 
         Some(message.clone())
     });
@@ -1193,6 +1199,7 @@ fn setup_ibus(
         conn,
         signal_ids,
         filter_id: Some(caret_filter_id),
+        caret_task: Some(caret_task),
     })
 }
 

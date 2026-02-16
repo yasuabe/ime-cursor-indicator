@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=IME Cursor Indicator
+Exec=python3 /path/to/ime_cursor_indicator.py
+Hidden=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=4

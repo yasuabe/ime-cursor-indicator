@@ -54,6 +54,17 @@ offset_x = 24
 
 優先順位: 設定ファイル `[on]`/`[off]` セクション > コマンドライン引数 / 設定ファイル（トップレベル） > ハードコードデフォルト
 
+### 自動起動
+
+ログイン時に自動起動するには、`.desktop` ファイルを `~/.config/autostart/` に配置します。
+
+```bash
+mkdir -p ~/.config/autostart
+cp ime-cursor-indicator.desktop.example ~/.config/autostart/ime-cursor-indicator.desktop
+```
+
+`Exec=` の `/path/to/ime_cursor_indicator.py` を実際のパスに書き換えてください。
+
 ### 注意
 
 - Mozc のモード判定は IBus プロパティ構造の差異を吸収するため、best-effort の解析です。

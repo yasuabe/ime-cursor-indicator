@@ -9,6 +9,5 @@ cairo-rs = "0.18"
 pango = "0.18"
 pangocairo = "0.18"
 glib = "0.18"
+gio = "0.18"
 libc = "0.2"
-zbus = { version = "4", features = ["blocking"] }
-async-io = "2"

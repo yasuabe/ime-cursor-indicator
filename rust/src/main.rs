@@ -116,6 +116,23 @@ struct OverlayState {
     last_window_y: i32,
 }
 
+struct IBusRuntime {
+    conn: gio::DBusConnection,
+    signal_ids: Vec<gio::SignalSubscriptionId>,
+    filter_id: Option<gio::FilterId>,
+}
+
+impl Drop for IBusRuntime {
+    fn drop(&mut self) {
+        for id in self.signal_ids.drain(..) {
+            self.conn.signal_unsubscribe(id);
+        }
+        if let Some(id) = self.filter_id.take() {
+            self.conn.remove_filter(id);
+        }
+    }
+}
+
 type AppIndicatorNewFn = unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> *mut c_void;
 type AppIndicatorSetStatusFn = unsafe extern "C" fn(*mut c_void, c_int);
 type AppIndicatorSetMenuFn = unsafe extern "C" fn(*mut c_void, *mut gtk::ffi::GtkMenu);
@@ -972,12 +989,12 @@ fn setup_ibus(
     state: &Rc<RefCell<OverlayState>>,
     window: &gtk::Window,
     tray: Option<Rc<TrayIndicator>>,
-) {
+) -> Option<IBusRuntime> {
     let addr = match discover_ibus_address() {
         Some(a) => a,
         None => {
             eprintln!("Failed to discover IBus address");
-            return;
+            return None;
         }
     };
 
@@ -991,9 +1008,11 @@ fn setup_ibus(
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to connect to IBus: {}", e);
-            return;
+            return None;
         }
     };
+
+    let mut signal_ids = Vec::new();
 
     // Get initial engine
     if let Ok(reply) = conn.call_sync(
@@ -1043,7 +1062,7 @@ fn setup_ibus(
     let state_eng = Rc::clone(state);
     let window_eng = window.clone();
     let tray_eng = tray.clone();
-    conn.signal_subscribe(
+    let global_engine_changed_id = conn.signal_subscribe(
         None::<&str>,
         Some("org.freedesktop.IBus"),
         Some("GlobalEngineChanged"),
@@ -1057,12 +1076,13 @@ fn setup_ibus(
             }
         },
     );
+    signal_ids.push(global_engine_changed_id);
 
     // Subscribe to UpdateProperty (eavesdrop — match rule already added)
     let state_prop = Rc::clone(state);
     let window_prop = window.clone();
     let tray_prop = tray.clone();
-    conn.signal_subscribe(
+    let update_property_id = conn.signal_subscribe(
         None::<&str>,
         Some("org.freedesktop.IBus.InputContext"),
         Some("UpdateProperty"),
@@ -1078,6 +1098,7 @@ fn setup_ibus(
             }
         },
     );
+    signal_ids.push(update_property_id);
 
     let (caret_sender, caret_receiver) =
         glib::MainContext::channel::<(i32, i32, i32, i32)>(glib::Priority::DEFAULT);
@@ -1100,7 +1121,7 @@ fn setup_ibus(
     let caret_sender_filter = caret_sender.clone();
     let focused_ic_path_filter = Rc::clone(&focused_ic_path);
     let last_cursor_filter = Rc::clone(&last_cursor);
-    let _caret_filter_id = conn.add_filter(move |_conn, message, incoming| {
+    let caret_filter_id = conn.add_filter(move |_conn, message, incoming| {
         if !incoming {
             return Some(message.clone());
         }
@@ -1175,9 +1196,11 @@ fn setup_ibus(
         Some(message.clone())
     });
 
-    // Keep the connection alive for the lifetime of the program.
-    // Leaking is intentional — the connection must outlive signal subscriptions.
-    std::mem::forget(conn);
+    Some(IBusRuntime {
+        conn,
+        signal_ids,
+        filter_id: Some(caret_filter_id),
+    })
 }
 
 fn main() {
@@ -1276,14 +1299,19 @@ fn main() {
 
     let tray = TrayIndicator::new().map(Rc::new);
 
-    setup_ibus(&state, &window, tray.clone());
+    let ibus_runtime = setup_ibus(&state, &window, tray.clone());
 
     glib::unix_signal_add_local(libc::SIGINT, || {
+        gtk::main_quit();
+        glib::ControlFlow::Break
+    });
+    glib::unix_signal_add_local(libc::SIGTERM, || {
         gtk::main_quit();
         glib::ControlFlow::Break
     });
 
     gtk::main();
 
+    drop(ibus_runtime);
     drop(tray);
 }

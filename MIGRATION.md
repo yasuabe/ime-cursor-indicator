@@ -84,7 +84,7 @@ ime-cursor-indicator/
 - Signal handling (`SIGINT`, `SIGTERM`).
 - Compare behavior side-by-side with Python version.
 - Update `README.md` with Rust build/run instructions.
-- Remove or archive Python version.
+- Keep Python version in-tree for now (no archive/removal yet).
 
 ## Testing Strategy
 

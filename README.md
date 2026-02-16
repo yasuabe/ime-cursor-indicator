@@ -67,7 +67,38 @@ cp ime-cursor-indicator.desktop.example ~/.config/autostart/ime-cursor-indicator
 
 ## Rust 版
 
-準備中。詳細は [MIGRATION.md](MIGRATION.md) を参照。
+メイン実装は `rust/` です。Python 版は当面併存します。
+
+### 依存パッケージ
+
+Ubuntu の例:
+
+```bash
+sudo apt install -y libgtk-3-dev libglib2.0-dev libcairo2-dev libpango1.0-dev
+```
+
+トップバー表示（System Tray）を有効にする場合は、実行時ライブラリも入れてください:
+
+```bash
+sudo apt install -y libayatana-appindicator3-1
+```
+
+### ビルドと実行
+
+```bash
+cd rust
+cargo run
+```
+
+オプション例:
+
+```bash
+cargo run -- --poll-ms 60 --opacity 0.8 --offset-x 24 --offset-y 16
+```
+
+設定ファイルの優先順位は Python 版と同じです:
+
+`[on]`/`[off]` セクション > コマンドライン引数 / 設定ファイル（トップレベル） > ハードコードデフォルト
 
 ## 注意
 

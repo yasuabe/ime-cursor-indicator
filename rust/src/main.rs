@@ -877,7 +877,7 @@ fn start_pointer_poll(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window) {
     let (should_start, poll_ms) = {
         let st = state.borrow();
         (
-            st.pointer_poll_source.is_none() && !st.caret_known && st.label != "A",
+            st.pointer_poll_source.is_none() && !st.caret_known,
             st.poll_ms.max(1),
         )
     };
@@ -890,7 +890,7 @@ fn start_pointer_poll(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window) {
     let source = glib::timeout_add_local(Duration::from_millis(poll_ms), move || {
         let should_continue = {
             let st = state_poll.borrow();
-            !st.caret_known && st.label != "A"
+            !st.caret_known
         };
         if !should_continue {
             state_poll.borrow_mut().pointer_poll_source = None;
@@ -907,12 +907,10 @@ fn mark_caret_unknown(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window) {
         let mut st = state.borrow_mut();
         st.caret_known = false;
     }
-    if state.borrow().label != "A" {
-        move_to_pointer(state, window);
-        start_pointer_poll(state, window);
-        if !window.is_visible() {
-            window.show_all();
-        }
+    move_to_pointer(state, window);
+    start_pointer_poll(state, window);
+    if !window.is_visible() {
+        window.show_all();
     }
 }
 
@@ -927,7 +925,7 @@ fn move_to_caret(state: &Rc<RefCell<OverlayState>>, window: &gtk::Window, x: i32
     };
     stop_pointer_poll(state);
     move_overlay_if_changed(state, window, x, y, x + offset_x, y + h + offset_y);
-    if state.borrow().label != "A" && !window.is_visible() {
+    if !window.is_visible() {
         window.show_all();
     }
 }
@@ -966,23 +964,18 @@ fn update_label(
         tray.set_label(label);
     }
     apply_style_for_label(state, window, label);
-    if label == "A" {
-        stop_pointer_poll(state);
-        window.hide();
+    if state.borrow().caret_known {
+        let (x, y, h) = {
+            let st = state.borrow();
+            (st.caret_x, st.caret_y, st.caret_h)
+        };
+        move_to_caret(state, window, x, y, h);
     } else {
-        if state.borrow().caret_known {
-            let (x, y, h) = {
-                let st = state.borrow();
-                (st.caret_x, st.caret_y, st.caret_h)
-            };
-            move_to_caret(state, window, x, y, h);
-        } else {
-            move_to_pointer(state, window);
-            start_pointer_poll(state, window);
-        }
-        window.show_all();
-        window.queue_draw();
+        move_to_pointer(state, window);
+        start_pointer_poll(state, window);
     }
+    window.show_all();
+    window.queue_draw();
 }
 
 fn setup_ibus(

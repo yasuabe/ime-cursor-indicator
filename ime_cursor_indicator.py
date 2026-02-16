@@ -8,7 +8,6 @@ method calls on the IBus private bus.
 from __future__ import annotations
 
 import argparse
-import time
 import os
 import shutil
 import signal
@@ -63,37 +62,45 @@ class CaretTracker:
     def start(self):
         conn = self._bus.get_connection()
 
-        match_rule = (
-            "eavesdrop=true,"
-            "type='method_call',"
-            f"interface='{self._IC_IFACE}',"
-            "member='SetCursorLocation'"
-        )
-        try:
-            conn.call_sync(
-                "org.freedesktop.DBus",
-                "/org/freedesktop/DBus",
-                "org.freedesktop.DBus",
-                "AddMatch",
-                GLib.Variant("(s)", (match_rule,)),
-                None,
-                Gio.DBusCallFlags.NONE,
-                -1,
-                None,
+        for member in ("SetCursorLocation", "FocusOut"):
+            match_rule = (
+                "eavesdrop=true,"
+                "type='method_call',"
+                f"interface='{self._IC_IFACE}',"
+                f"member='{member}'"
             )
-        except Exception as exc:
-            print(f"Warning: AddMatch for SetCursorLocation failed: {exc}",
-                  file=sys.stderr)
-            return
+            try:
+                conn.call_sync(
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "AddMatch",
+                    GLib.Variant("(s)", (match_rule,)),
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    -1,
+                    None,
+                )
+            except Exception as exc:
+                print(f"Warning: AddMatch for {member} failed: {exc}",
+                      file=sys.stderr)
+                return
         conn.add_filter(self._message_filter)
 
     def _message_filter(self, connection, message, incoming):
         if not incoming:
             return message
-
-        if message.get_member() != "SetCursorLocation":
-            return message
         if message.get_interface() != self._IC_IFACE:
+            return message
+
+        member = message.get_member()
+
+        if member == "FocusOut":
+            self._last = (-1, -1, -1, -1)
+            GLib.idle_add(self._on_cursor_lost)
+            return message
+
+        if member != "SetCursorLocation":
             return message
 
         body = message.get_body()
@@ -105,7 +112,7 @@ class CaretTracker:
         w = body.get_child_value(2).get_int32()
         h = body.get_child_value(3).get_int32()
 
-        # (0,0,0,0) is a focus-loss reset; ignore it
+        # (0,0,0,0) is a focus-loss reset
         if x == 0 and y == 0 and w == 0 and h == 0:
             self._last = (-1, -1, -1, -1)
             GLib.idle_add(self._on_cursor_lost)
@@ -232,8 +239,6 @@ class IBusWatcher:
 
 
 class OverlayWindow:
-    _CARET_STALE_SEC = 1.2
-
     def __init__(
         self,
         *,
@@ -245,7 +250,6 @@ class OverlayWindow:
         self.label = "A"
         self._visible = False
         self._caret_known = False
-        self._last_caret_update = 0.0
 
         # Start with off_style
         style = self.off_style
@@ -334,7 +338,6 @@ class OverlayWindow:
     def move_to_caret(self, cx, cy, cw, ch):
         """Position the overlay relative to the caret rectangle."""
         self._caret_known = True
-        self._last_caret_update = time.monotonic()
         display = Gdk.Display.get_default()
         monitor = display.get_monitor_at_point(cx, cy)
         geom = monitor.get_geometry()
@@ -370,20 +373,15 @@ class OverlayWindow:
         self.window.hide()
 
     def mark_caret_lost(self):
+        """Called when SetCursorLocation(0,0,0,0) indicates focus loss."""
         self._caret_known = False
-        self._last_caret_update = 0.0
         if self._visible:
             self._move_to_pointer()
             if not self.window.get_visible():
                 self.window.show_all()
 
     def tick_pointer(self):
-        if (
-            self._visible
-            and self._caret_known
-            and (time.monotonic() - self._last_caret_update) > self._CARET_STALE_SEC
-        ):
-            self.mark_caret_lost()
+        """Poll mouse position only when caret position is unknown."""
         if self._visible and not self._caret_known:
             self._move_to_pointer()
         return True

@@ -33,3 +33,4 @@ Thumbs.db
 *.local
 *-memo.md
 poc_*.py
+tmp/

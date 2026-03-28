@@ -1,130 +1,122 @@
-# Specification: ime-cursor-indicator
+# 仕様書: ime-cursor-indicator
 
-Current behavior specification based on the Python prototype.
+## 概要
 
-## Overview
+日本語入力（IME）の現在の入力モードを、テキストキャレットの近くに小さなオーバーレイで表示するアプリケーション。
 
-Mouse cursor (or text caret) near an IME mode indicator for Ubuntu/X11 + IBus.
-Displays `A` (alphanumeric) or `あ` (Japanese input) as a small overlay window.
+ユーザーがテキストを入力している場所のすぐそばに「あ」（日本語入力）または「A」（英数入力）を常に表示することで、視線を動かさずに入力モードを確認できるようにする。
 
-## Target Environment
+## 対象環境
 
 - OS: Ubuntu (Linux)
-- Display server: X11 only (Wayland is out of scope)
-- IME framework: IBus
-- Primary IME: Mozc (`mozc-jp`)
+- ディスプレイサーバー: X11 のみ（Wayland は対象外）
+- IME フレームワーク: IBus
+- 主要 IME: Mozc
 
-## Features
+## オーバーレイの外観
 
-### 1. IME Mode Detection
+- 角丸の矩形バッジ（角丸半径: 短辺の 32%）
+- 白文字
+- 日本語入力オン（「あ」）: 赤背景
+- 英数入力（「A」）: 黒背景
+- 常に最前面に表示される
+- 入力フォーカスを奪わない
+- タスクバーやページャーに表示されない
 
-- **Engine change**: Listen to IBus `global-engine-changed` signal.
-  - Engines containing `mozc`, `anthy`, `kkc`, `japanese`, `kana` → label `あ`
-  - All others → label `A`
-- **Mozc input mode change**: Watch `InputContext.update-property` signal.
-  - Filter by property key containing `inputmode` (case-insensitive).
-  - Symbol `あ` / `ア` / `ｱ` → label `あ`
-  - Symbol `A` / `_` → label `A`
-  - Fallback heuristics based on symbol text (`hiragana`, `katakana` → `あ`; `latin`, `direct`, `alphanumeric` → `A`)
-- **Focus tracking**: Periodically re-check the current input context (500ms interval) to detect focus changes across applications.
+## オーバーレイの位置
 
-### 2. Overlay Window
+### 基本原則
 
-- GTK3 popup window (`Gtk.WindowType.POPUP`)
-- Transparent background with rounded-rectangle badge
-- Text rendered with Pango/Cairo (`Sans Bold 16`)
-- Window properties:
-  - `override_redirect` (popup type)
-  - Always on top (`keep_above`)
-  - Does not steal input focus
-  - Skips taskbar and pager
-  - Window type hint: `NOTIFICATION`
-  - Per-pixel alpha via RGBA visual
+オーバーレイは、ユーザーが現在テキストを入力している場所のそばに表示される。ユーザーの視線がテキストキャレットにあることを前提に、オーバーレイもキャレットの近くに置くことで、視線移動なしに入力モードを確認できるようにする。
 
-#### Visual Style
+### キャレットモード
 
-- Japanese input ON (`あ`): **red** background (0.8, 0, 0)
-- Alphanumeric (`A`): **black** background (0, 0, 0)
-- White text in both cases
-- Corner radius: `min(width, height) * 0.32`
+テキスト入力欄にフォーカスがある間、オーバーレイはテキストキャレットの位置に追従する。
 
-#### Visibility Rules
+- マウスポインタを動かしても、オーバーレイはキャレット位置に留まる
+- キャレットが移動すれば、オーバーレイも追従する
+- 別のテキスト入力欄にフォーカスが移った場合、移動先のキャレット位置にオーバーレイが移動する。ユーザーがタイプするのを待たない
 
-- Shown when IME label is `あ` (Japanese input ON)
-- Hidden when IME label is `A` (alphanumeric)
+### ポインタモード
 
-### 3. Caret Tracking
+テキスト入力欄にフォーカスがない場合（ボタン、メニュー、デスクトップなど）、オーバーレイはマウスポインタに追従する。
 
-- Eavesdrops on IBus private bus `SetCursorLocation` method calls via D-Bus `AddMatch` with `eavesdrop=true`.
-- Receives caret rectangle `(x, y, w, h)`.
-- Overlay is positioned relative to the caret: `(x + offset_x, y + h + offset_y)`.
-- Clamped to monitor bounds.
-- Deduplicates identical coordinates.
-- `SetCursorLocation(0, 0, 0, 0)` is treated as focus loss.
+### モード遷移
 
-### 4. Focus Loss / Pointer Fallback
+| 遷移元 | 遷移先 | 条件 |
+|---|---|---|
+| ポインタモード | キャレットモード | テキスト入力欄にフォーカスが入った |
+| キャレットモード | キャレットモード | 別のテキスト入力欄にフォーカスが移った |
+| キャレットモード | ポインタモード | テキスト入力欄以外にフォーカスが移った |
 
-- On `FocusOut` or `SetCursorLocation(0,0,0,0)`:
-  - Caret position is marked as unknown.
-  - Overlay falls back to following the mouse pointer.
-- Mouse pointer position is polled at `poll_ms` interval (default 75ms) only when caret position is unknown.
+### 配置
 
-### 5. System Tray Indicator
+- オーバーレイはキャレット（またはマウスポインタ）から設定可能なオフセット分だけずらして配置される
+- モニターの境界からはみ出さないようにクランプされる
 
-- Uses `AyatanaAppIndicator3`.
-- Displays a 22x22 circular icon:
-  - `A` on black circle (alphanumeric)
-  - `あ` on red circle (Japanese input)
-- Icons are rendered as PNG files in a temporary directory at startup.
-- Provides a "Quit" menu item.
-- Temporary icon files are cleaned up on shutdown.
+## IME モード表示
 
-### 6. Configuration
+### エンジン切り替え
 
-#### Config File
+- 日本語入力エンジン（Mozc、Anthy 等）が選択された場合 →「あ」
+- それ以外のエンジン →「A」
 
-- Path: `~/.config/ime-cursor-indicator/config.toml`
-- Format: TOML
+### 入力モード変更
 
-#### Parameters
+- ひらがな、カタカナ →「あ」
+- 英数、直接入力 →「A」
 
-| Key        | Type  | Default | Description                   |
-|------------|-------|---------|-------------------------------|
-| `poll_ms`  | int   | 75      | Pointer polling interval (ms) |
-| `offset_x` | int   | 20      | X offset from caret/cursor    |
-| `offset_y` | int   | 18      | Y offset from caret/cursor    |
-| `width`    | int   | 34      | Overlay window width (px)     |
-| `height`   | int   | 34      | Overlay window height (px)    |
-| `opacity`  | float | 0.70    | Background opacity (0.1–1.0)  |
+## システムトレイ
 
-#### Per-Mode Style Overrides
+- システムトレイに現在の入力モードをアイコンで表示する
+  - 英数入力: 黒丸に「A」
+  - 日本語入力: 赤丸に「あ」
+- 「Quit」メニュー項目を提供する
 
-`[on]` and `[off]` sections in the config file can override style keys (`offset_x`, `offset_y`, `width`, `height`, `opacity`) independently for Japanese-ON and alphanumeric-OFF states.
+## 設定
 
-#### Priority
+### 設定ファイル
+
+- パス: `~/.config/ime-cursor-indicator/config.toml`
+- 形式: TOML
+
+### パラメータ
+
+| キー | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `poll_ms` | 整数 | 75 | ポインタポーリング間隔（ミリ秒） |
+| `offset_x` | 整数 | 20 | キャレット/ポインタからの X オフセット |
+| `offset_y` | 整数 | 18 | キャレット/ポインタからの Y オフセット |
+| `width` | 整数 | 34 | オーバーレイの幅（ピクセル） |
+| `height` | 整数 | 34 | オーバーレイの高さ（ピクセル） |
+| `opacity` | 小数 | 0.70 | 背景の不透明度（0.1〜1.0） |
+
+### モード別スタイル
+
+`[on]`（日本語入力）と `[off]`（英数入力）セクションで、上記パラメータをモード別に上書きできる。
+
+### 優先順位
 
 ```
-[on]/[off] section  >  CLI args / top-level config  >  hardcoded defaults
+モード別セクション > コマンドライン引数・トップレベル設定 > 既定値
 ```
 
-#### CLI Arguments
+### コマンドライン引数
 
 ```
---poll-ms    (int)
---offset-x   (int)
---offset-y   (int)
---width      (int)
---height     (int)
---opacity    (float)
+--poll-ms    (整数)
+--offset-x   (整数)
+--offset-y   (整数)
+--width      (整数)
+--height     (整数)
+--opacity    (小数)
 ```
 
-### 7. Lifecycle
+## ライフサイクル
 
-- Startup: `IBus.init()` → create overlay → create tray → connect IBus watcher → start caret tracker → enter GLib main loop.
-- Shutdown: triggered by `SIGINT`, `SIGTERM`, or tray "Quit". Disconnects signals, destroys windows, cleans up temp files, exits main loop.
+- 終了は SIGINT、SIGTERM、またはシステムトレイの「Quit」で行う
+- 終了時にすべてのリソースを解放する
 
-## Known Limitations
+## 既知の制限
 
-- Mozc mode detection is best-effort (IBus property structure varies).
-- X11 only; no Wayland support.
-- Single-monitor clamping uses the monitor at the caret/pointer position.
+- X11 のみ対応。Wayland は非対応

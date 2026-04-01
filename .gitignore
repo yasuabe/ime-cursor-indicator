@@ -28,6 +28,7 @@ rust/target/
 Thumbs.db
 
 # Local / env
+.codex
 .env
 .env.local
 *.local

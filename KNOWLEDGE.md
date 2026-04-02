@@ -34,3 +34,16 @@
 - Rust: `atspi` クレート (zbus ベース) が存在するが、zbus は IBus 専用バスで問題を起こした前例がある。gio D-Bus 直接利用も選択肢
 - 空テキストでは `GetCharacterExtents` が `(-1, -1)` を返す場合がある
 - **注意**: AT-SPI も専用バスなので、IBus と同じ接続問題が起こりうる
+
+## AT-SPI フォーカス観測の注意点
+
+- `object:state-changed:focused` 自体は広く発生するが、ブラウザ内 `input` / `textarea` では `window` や `panel` の focused ばかり見え、入力要素自身を直接示さない場合がある
+- `focused` 以外にも `PropertyChange`、`TextChanged`、`VisibleDataChanged`、`BoundsChanged` など多数のオブジェクトイベントが出るため、広い購読だけでは目的イベントを特定しにくい
+- `Alt+Tab` や `Tab` を境界に後から必要区間を抽出するには、POC のログにタイムスタンプと連番を付け、ファイルへ保存しておくのが有効
+
+## ブラウザ差異: Firefox と Chrome
+
+- Firefox では、ページ内テキスト入力要素へフォーカスが移ると、オーバーレイは概ね期待通りに追随する
+- Chrome では、ページ内テキスト入力要素へフォーカスが移った直後はオーバーレイが追随しない場合がある
+- ただし Chrome でも、フォーカス後に何らかのキーイベントが入るとオーバーレイがキャレット位置へ移動することがある
+- この差から、Chrome ではフォーカス移動直後の `SetCursorLocation` 相当の通知が弱い、または遅延している可能性が高い

@@ -33,5 +33,4 @@ Thumbs.db
 .env.local
 *.local
 *-memo.md
-poc_*.py
 tmp/

@@ -24,3 +24,7 @@
 
 - Medium/High: fix by default
 - Low: evaluate cost/benefit before deciding
+
+## Review Checklists
+
+- install.sh: See [REVIEW_INSTALL.md](REVIEW_INSTALL.md)

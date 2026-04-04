@@ -39,9 +39,24 @@ cargo run -- --poll-ms 60 --opacity 0.8 --offset-x 24 --offset-y 16
 
 `[on]`/`[off]` セクション > コマンドライン引数 / 設定ファイル（トップレベル） > ハードコードデフォルト
 
-### 実運用（Ubuntu/X11）
+### インストール（Ubuntu/X11）
 
-リリースビルドした実行ファイルを `~/.local/bin` に配置し、`~/.config/autostart` から起動する運用を推奨。
+インストールスクリプトを使うと、ビルド・バイナリ配置・設定ファイル・自動起動の設定をまとめて行えます。
+
+```bash
+./install.sh
+```
+
+install.sh は以下を実行します:
+
+1. `rust/` で `cargo build --release` を実行
+2. バイナリを `~/.local/bin/ime-cursor-indicator` に配置
+3. `~/.config/ime-cursor-indicator/config.toml` がなければデフォルト設定をコピー（既存の設定は保持）
+4. `~/.config/autostart/ime-cursor-indicator.desktop` を生成（ログイン時の自動起動用）
+
+#### 手動インストール
+
+install.sh を使わず手動で行う場合:
 
 ```bash
 cd rust
@@ -50,11 +65,18 @@ mkdir -p ~/.local/bin
 install -m 755 target/release/ime-cursor-indicator ~/.local/bin/ime-cursor-indicator
 ```
 
-自動起動設定:
+設定ファイル:
+
+```bash
+mkdir -p ~/.config/ime-cursor-indicator
+cp config.toml.example ~/.config/ime-cursor-indicator/config.toml
+```
+
+自動起動設定（`<username>` は実際のユーザー名に置き換え）:
 
 ```bash
 mkdir -p ~/.config/autostart
-cat > ~/.config/autostart/ime-cursor-indicator.desktop <<'EOF'
+cat > ~/.config/autostart/ime-cursor-indicator.desktop <<EOF
 [Desktop Entry]
 Type=Application
 Name=IME Cursor Indicator
@@ -63,11 +85,9 @@ Hidden=false
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=4
 OnlyShowIn=GNOME;Unity;XFCE;MATE;Cinnamon;
-Terminal=false          
+Terminal=false
 EOF
 ```
-
-`Exec=` は必要に応じて実際の配置先に合わせてください。
 
 ## 注意
 
